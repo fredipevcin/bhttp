@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -96,12 +97,14 @@ func (*suite) TestParseArg(c *gc.C) {
 	}
 }
 
-var newContextTests = []struct {
+type newContextTest struct {
 	about         string
 	args          []string
 	expectContext context
 	expectError   string
-}{{
+}
+
+var newContextTests = []newContextTest{{
 	about:       "no arguments",
 	expectError: errUsage.Error(),
 }, {
@@ -294,30 +297,88 @@ func rawMessage(s string) *json.RawMessage {
 	return &m
 }
 
+func (test *newContextTest) run(c *gc.C, testIndex int) {
+	c.Logf("test %d: %s", testIndex, test.about)
+	fset := flag.NewFlagSet("http", flag.ContinueOnError)
+	ctxt, _, err := newContext(fset, test.args)
+	if test.expectError != "" {
+		c.Assert(err, gc.ErrorMatches, test.expectError)
+		return
+	}
+	c.Assert(err, gc.IsNil)
+	if len(ctxt.header) == 0 {
+		ctxt.header = nil
+	}
+	if len(ctxt.urlValues) == 0 {
+		ctxt.urlValues = nil
+	}
+	if len(ctxt.form) == 0 {
+		ctxt.form = nil
+	}
+	if len(ctxt.jsonObj) == 0 {
+		ctxt.jsonObj = nil
+	}
+	c.Logf("url %s", ctxt.url)
+	c.Assert(ctxt, jc.DeepEquals, &test.expectContext)
+}
+
 func (*suite) TestNewContext(c *gc.C) {
 	for i, test := range newContextTests {
-		c.Logf("test %d: %s", i, test.about)
-		fset := flag.NewFlagSet("http", flag.ContinueOnError)
-		ctxt, _, err := newContext(fset, test.args)
-		if test.expectError != "" {
-			c.Assert(err, gc.ErrorMatches, test.expectError)
-			continue
-		}
-		c.Assert(err, gc.IsNil)
-		if len(ctxt.header) == 0 {
-			ctxt.header = nil
-		}
-		if len(ctxt.urlValues) == 0 {
-			ctxt.urlValues = nil
-		}
-		if len(ctxt.form) == 0 {
-			ctxt.form = nil
-		}
-		if len(ctxt.jsonObj) == 0 {
-			ctxt.jsonObj = nil
-		}
-		c.Logf("url %s", ctxt.url)
-		c.Assert(ctxt, jc.DeepEquals, &test.expectContext)
+		test.run(c, i)
+	}
+}
+
+func (*suite) TestNewContextWithFileVals(c *gc.C) {
+	f, err := ioutil.TempFile("", "bhttp_test")
+	c.Assert(err, gc.IsNil)
+	defer os.Remove(f.Name())
+	text := `{"x":true}`
+	_, err = f.Write([]byte(text))
+	c.Assert(err, gc.IsNil)
+	f.Close()
+
+	tests := []newContextTest{{
+		about: "form value in file",
+		args: []string{
+			"foo.com",
+			"j1=@" + f.Name(),
+		},
+		expectContext: context{
+			method: "POST",
+			form: url.Values{
+				"j1": {text},
+			},
+			url: &url.URL{
+				Scheme: "http",
+				Host:   "foo.com",
+			},
+		},
+	}, {
+		about: "json data values in file",
+		args: []string{
+			"--json",
+			"foo.com",
+			"u1=@" + f.Name(),
+			"u2:=@" + f.Name(),
+		},
+		expectContext: context{
+			method: "POST",
+			jsonObj: map[string]interface{}{
+				"u1": text,
+				"u2": rawMessage(text),
+			},
+			url: &url.URL{
+				Scheme: "http",
+				Host:   "foo.com",
+				Path:   "",
+			},
+			header: http.Header{
+				"Content-Type": {"application/json"},
+			},
+		},
+	}}
+	for i, test := range tests {
+		test.run(c, i)
 	}
 }
 

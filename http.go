@@ -65,7 +65,7 @@ const helpMessage = `usage: http [flag...] [METHOD] URL [REQUEST_ITEM [REQUEST_I
       
           awesome:=true  amount:=42  colors:='["red", "green", "blue"]'
       
-      '@' Form file fields (only with --form, -f):
+      '@' Form file fields (only with --form, -f): (NOT YET SUPPORTED)
       
           cs@~/Documents/CV.pdf
       
@@ -274,7 +274,7 @@ func parseArgs(fset *flag.FlagSet, args []string) (*params, error) {
 		if err != nil {
 			return nil, fmt.Errorf("cannot parse %q: %v", arg, err)
 		}
-		if kv.sep == "=" && p.method == "" {
+		if isDataSendingSep(kv.sep) && p.method == "" {
 			p.method = "POST"
 		}
 		p.keyVals[i] = kv
@@ -283,6 +283,11 @@ func parseArgs(fset *flag.FlagSet, args []string) (*params, error) {
 		p.method = "GET"
 	}
 	return &p, nil
+}
+
+func isDataSendingSep(sep string) bool {
+	sep = strings.TrimSuffix(sep, "@")
+	return sep == ":=" || sep == "=" || sep == ""
 }
 
 func isMethod(s string) bool {
@@ -419,10 +424,12 @@ func newClient(p *params) (*cookiejar.Jar, *httpbakery.Client, error) {
 }
 
 var sepFuncs = map[string]func(ctxt *context, p *params, key, val string) error{
-	":":  (*context).httpHeader,
-	"==": (*context).urlParam,
-	"=":  (*context).dataString,
-	":=": (*context).jsonOther,
+	":":   (*context).httpHeader,
+	"==":  (*context).urlParam,
+	"=":   (*context).dataString,
+	"=@":  (*context).dataStringFile,
+	":=":  (*context).jsonOther,
+	":=@": (*context).jsonOtherFile,
 }
 
 func (ctxt *context) addKeyVal(p *params, kv keyVal) error {
@@ -435,13 +442,13 @@ func (ctxt *context) addKeyVal(p *params, kv keyVal) error {
 
 // separators holds all the possible key-pair separators, most ambiguous first.
 var separators = []string{
-	":=@",
-	":=",
-	":",
-	"==",
-	"=@",
-	"=",
-	"@",
+	":=@", // raw JSON file
+	":=",  // raw JSON value
+	":",   // HTTP header
+	"==",  // URL parameter
+	"=@",  // data field from file.
+	"=",   // data field.
+	"@",   // form file field.
 }
 
 func parseKeyVal(s string) (keyVal, error) {
@@ -458,16 +465,18 @@ func parseKeyVal(s string) (keyVal, error) {
 			continue
 		}
 		for _, sep := range separators {
-			if strings.HasPrefix(s[i:], sep) {
-				if len(keyBytes) == 0 {
-					return keyVal{}, fmt.Errorf("empty key")
-				}
-				return keyVal{
-					key: string(keyBytes),
-					sep: sep,
-					val: s[i+len(sep):],
-				}, nil
+			if !strings.HasPrefix(s[i:], sep) {
+				continue
 			}
+			if len(keyBytes) == 0 {
+				return keyVal{}, fmt.Errorf("empty key")
+			}
+			val := s[i+len(sep):]
+			return keyVal{
+				key: string(keyBytes),
+				sep: sep,
+				val: val,
+			}, nil
 		}
 		keyBytes = append(keyBytes, string(r)...)
 	}
@@ -496,6 +505,15 @@ func (ctxt *context) dataString(p *params, key, val string) error {
 	return nil
 }
 
+// key=@val
+func (ctxt *context) dataStringFile(p *params, key, val string) error {
+	data, err := ioutil.ReadFile(val)
+	if err != nil {
+		return err
+	}
+	return ctxt.dataString(p, key, string(data))
+}
+
 // key:=val
 func (ctxt *context) jsonOther(p *params, key, val string) error {
 	if !p.json {
@@ -507,6 +525,15 @@ func (ctxt *context) jsonOther(p *params, key, val string) error {
 	}
 	ctxt.jsonObj[key] = &m
 	return nil
+}
+
+// key:=@file
+func (ctxt *context) jsonOtherFile(p *params, key, val string) error {
+	data, err := ioutil.ReadFile(val)
+	if err != nil {
+		return err
+	}
+	return ctxt.jsonOther(p, key, string(data))
 }
 
 func fatalf(f string, a ...interface{}) {
